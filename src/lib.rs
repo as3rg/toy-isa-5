@@ -5,3 +5,4 @@ pub mod helpers;
 pub mod globals;
 pub mod memory;
 pub mod cpu;
+pub mod jit;
