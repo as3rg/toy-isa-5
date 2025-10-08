@@ -3,3 +3,5 @@ name = "jit"
 version = "0.1.0"
 edition = "2024"
 
+[dependencies]
+instr_gen = {path = "./instr_gen"}
