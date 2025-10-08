@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 instr_gen = {path = "./instr_gen"}
+num_enum = "0.7"
