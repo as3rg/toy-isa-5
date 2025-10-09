@@ -14,7 +14,7 @@ impl CPUState {
 
 macro_rules! finish_cmd {
     ($cpu: expr) => {
-        $cpu.jump_rel(1).map(|_| ())
+        $cpu.jump_rel(CMD_SIZE.cast_signed()).map(|_| ())
     };
 }
 
@@ -233,7 +233,7 @@ impl Interpret for Bne {
         let rt = cpu.reg(self.get_rt())?.read()?;
 
         if rs != rt {
-            let new_pc = cpu.jump_rel(self.get_offset())?;
+            let new_pc = cpu.jump_rel(self.get_offset() * CMD_SIZE.cast_signed())?;
             log::debug!(
                 "pc: 0x{:08x} | bne: r{} (0x{:x}) != r{} (0x{:x}) -> 0x{:x}",
                 pc,
@@ -356,7 +356,7 @@ impl Interpret for Beq {
         let rt = cpu.reg(self.get_rt())?.read()?;
 
         if rs == rt {
-            let new_pc = cpu.jump_rel(self.get_offset())?;
+            let new_pc = cpu.jump_rel(self.get_offset() * CMD_SIZE.cast_signed())?;
             log::debug!(
                 "pc: 0x{:08x} | beq: r{} (0x{:x}) == r{} (0x{:x}) -> 0x{:x}",
                 pc,
@@ -386,12 +386,12 @@ impl Interpret for J {
     fn interpret(&self, cpu: &mut CPUState) -> ExecResult {
         let pc = cpu.pc();
         let mask = 0b00001111111111111111111111111111;
-        let new_addr = (cpu.pc() & !mask | (self.get_index() * CMD_SIZE) & mask) / CMD_SIZE;
+        let new_addr = cpu.pc() & !mask | (self.get_index() * CMD_SIZE) & mask;
 
         log::debug!(
             "pc: 0x{:08x} | jump to 0x{:x} (index: {})",
             pc,
-            new_addr * CMD_SIZE,
+            new_addr,
             self.get_index()
         );
 

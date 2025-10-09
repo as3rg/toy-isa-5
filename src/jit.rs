@@ -8,7 +8,7 @@ use dynasmrt::{
 use crate::{
     cmds::*,
     cpu::{CPUState, Reg},
-    globals::{ExecError, ExecResult, Itarget, Utarget, WORD_SIZE},
+    globals::{ExecError, ExecResult, Itarget, Utarget, CMD_SIZE, WORD_SIZE},
     helpers::bit_deposit,
     memory::Memory,
 };
@@ -136,7 +136,7 @@ impl CPUState {
     pub fn execute(&mut self, bb: &BasicBlock<X64Relocation>) -> ExecResult<Utarget> {
         let Self { regs, mem, .. } = self;
         bb.executor()(regs, mem)?;
-        self.jump_rel(bb.cmds_cnt as Itarget)
+        self.jump_rel((bb.cmds_cnt * CMD_SIZE).cast_signed())
     }
 }
 

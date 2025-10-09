@@ -1,8 +1,6 @@
 use num_enum::TryFromPrimitive;
 
-use crate::globals::{
-    CMD_SIZE, ExecError, ExecResult, Itarget, REGS_CNT, SYSCALL_ARGS_CNT, Utarget,
-};
+use crate::globals::{ExecError, ExecResult, Itarget, REGS_CNT, SYSCALL_ARGS_CNT, Utarget};
 
 use crate::memory::Memory;
 
@@ -53,14 +51,12 @@ impl CPUState {
     }
 
     pub fn jump_rel(&mut self, diff: Itarget) -> ExecResult<Utarget> {
-        self.pc_value = self
-            .pc_value
-            .wrapping_add_signed(diff * CMD_SIZE.cast_signed());
+        self.pc_value = self.pc_value.wrapping_add_signed(diff);
         Ok(self.pc_value)
     }
 
     pub fn jump_abs(&mut self, addr: Utarget) -> ExecResult<Utarget> {
-        self.pc_value = addr * CMD_SIZE;
+        self.pc_value = addr;
         Ok(self.pc_value)
     }
 
