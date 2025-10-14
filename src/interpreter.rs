@@ -341,7 +341,7 @@ impl Interpret for Syscall {
         );
 
         let res = cpu.syscall(code, &args)?;
-        cpu.reg_mut(SYSCALL_CODE)?.write(res)?;
+        cpu.reg_mut(SYSCALL_RET0)?.write(res)?;
 
         log::debug!("pc: 0x{:08x} | syscall result: 0x{:x}", pc, res);
 
