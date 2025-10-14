@@ -27,10 +27,18 @@ pub struct CPUState {
     pc_value: Utarget,
 }
 
-#[derive(Debug, TryFromPrimitive, PartialEq, Eq)]
+#[derive(Debug, TryFromPrimitive, PartialEq, Eq, Clone, Copy)]
 #[repr(u32)]
 pub enum SysCallCode {
     Exit = 60,
+}
+
+impl SysCallCode {
+    pub fn call(self, args: &[Utarget; SYSCALL_ARGS_CNT as _]) -> ExecResult<Utarget> {
+        match self {
+            SysCallCode::Exit => Err(ExecError::Exit { exit_code: args[0] }),
+        }
+    }
 }
 
 impl CPUState {
@@ -69,8 +77,6 @@ impl CPUState {
         code: SysCallCode,
         args: &[Utarget; SYSCALL_ARGS_CNT as _],
     ) -> ExecResult<Utarget> {
-        match code {
-            SysCallCode::Exit => Err(ExecError::Exit { exit_code: args[0] }),
-        }
+        code.call(args)
     }
 }

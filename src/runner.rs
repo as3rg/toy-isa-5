@@ -63,7 +63,7 @@ pub fn execute<Cmds: Read + Seek>(
         cmds.seek(SeekFrom::Start(pc as _))
             .map_err(ExecError::IOError)?;
 
-        let mut bbb = BasicBlockBuilder::new()?;
+        let mut bbb = BasicBlockBuilder::new(cpu)?;
 
         loop {
             // Read command
@@ -78,18 +78,12 @@ pub fn execute<Cmds: Read + Seek>(
             };
 
             // Generate Basic Block
-            match bbb.emit(&cmd)? {
-                EmitStatus::Accepted => {}
-                EmitStatus::Rejected if bbb.is_empty() => {
-                    cpu.interpret(cmd)?;
-                    break;
-                }
-                EmitStatus::Rejected => {
-                    let bb = bbb.finilize()?;
+            bbb = match bbb.emit(&cmd)? {
+                EmitStatus::Accepted(bbb) => bbb,
+                EmitStatus::Terminated(bb) => {
                     log::debug!("pc: 0x{:08x} | executing new basic block", pc);
                     let new_pc = cpu.execute(&bb)?;
                     log::debug!("pc: 0x{:08x} | exiting new basic block", new_pc);
-                    cpu.interpret(cmd)?;
 
                     bb_cache.insert(pc, bb);
                     break;

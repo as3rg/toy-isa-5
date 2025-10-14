@@ -1,39 +1,44 @@
 use std::{fmt::Debug, marker::PhantomData, mem};
 
 use dynasmrt::{
-    Assembler, AssemblyOffset, DynasmApi, ExecutableBuffer, dynasm, relocations::Relocation,
-    x64::X64Relocation,
+    Assembler, AssemblyOffset, DynasmApi, DynasmLabelApi, ExecutableBuffer, dynasm,
+    relocations::Relocation, x64::X64Relocation,
 };
+use num_enum::TryFromPrimitive;
 
 use crate::{
     cmds::*,
-    cpu::{CPUState, Reg},
-    globals::{ExecError, ExecResult, Itarget, Utarget, CMD_SIZE, WORD_SIZE},
-    helpers::bit_deposit,
+    cpu::{CPUState, Reg, SysCallCode},
+    globals::{
+        CMD_SIZE, ExecError, ExecResult, Itarget, REGS_CNT, SYSCALL_ARG0, SYSCALL_ARG1,
+        SYSCALL_ARG2, SYSCALL_ARG3, SYSCALL_ARG4, SYSCALL_ARG5, SYSCALL_ARG6, SYSCALL_ARG7,
+        SYSCALL_CODE, SYSCALL_RET0, Utarget, WORD_SIZE,
+    },
     memory::Memory,
 };
 
+#[derive(Debug)]
 pub struct BasicBlockBuilder<R: Relocation> {
     asm: Assembler<R>,
     start: AssemblyOffset,
-    cmds_cnt: Utarget,
+    pc: Utarget,
 }
 
+#[derive(Debug)]
 pub struct BasicBlock<R: Relocation> {
     buf: ExecutableBuffer,
     start: AssemblyOffset,
-    cmds_cnt: Utarget,
     reloc: PhantomData<R>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum EmitStatus {
-    Accepted,
-    Rejected,
+#[derive(Debug)]
+pub enum EmitStatus<R: Relocation> {
+    Accepted(BasicBlockBuilder<R>),
+    Terminated(BasicBlock<R>),
 }
 
 pub trait Emit<R: Relocation> {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<R>) -> ExecResult<EmitStatus>;
+    fn emit(&self, bbb: BasicBlockBuilder<R>) -> ExecResult<EmitStatus<R>>;
 }
 
 macro_rules! my_disasm {
@@ -75,25 +80,25 @@ impl<R> BasicBlockBuilder<R>
 where
     R: Relocation + Debug,
 {
-    pub fn new() -> ExecResult<Self> {
+    pub fn new(cpu: &CPUState) -> ExecResult<Self> {
         match Assembler::new() {
             Ok(asm) => Ok({
                 let start = asm.offset();
                 BasicBlockBuilder {
                     asm,
                     start,
-                    cmds_cnt: 0,
+                    pc: cpu.pc(),
                 }
             }),
             Err(e) => Err(ExecError::IOError(e)),
         }
     }
 
-    pub fn emit<T: Emit<R>>(&mut self, cmd: &T) -> ExecResult<EmitStatus> {
+    pub fn emit<T: Emit<R>>(self, cmd: &T) -> ExecResult<EmitStatus<R>> {
         match cmd.emit(self) {
-            Ok(EmitStatus::Accepted) => {
-                self.cmds_cnt += 1;
-                Ok(EmitStatus::Accepted)
+            Ok(EmitStatus::Accepted(mut bbb)) => {
+                bbb.pc += CMD_SIZE;
+                Ok(EmitStatus::Accepted(bbb))
             }
             x => x,
         }
@@ -102,32 +107,28 @@ where
     pub fn finilize(self) -> ExecResult<BasicBlock<R>> {
         let mut asm = self.asm;
         my_disasm!(asm
+        ; mov eax, (self.pc) as _
         ; ret
         );
 
         Ok(BasicBlock {
             buf: asm.finalize().unwrap(),
             start: self.start,
-            cmds_cnt: self.cmds_cnt,
             reloc: PhantomData,
         })
-    }
-
-    pub fn is_empty(&mut self) -> bool {
-        self.cmds_cnt == 0
     }
 }
 
 impl<R: Relocation> BasicBlock<R> {
-    fn raw_func(&self) -> extern "sysv64" fn(*mut Reg, *mut Memory, *mut ExecResult) {
+    fn raw_func(&self) -> extern "sysv64" fn(*mut Reg, *mut Memory, *mut ExecResult) -> Utarget {
         unsafe { mem::transmute(self.buf.ptr(self.start)) }
     }
 
-    pub fn executor(&self) -> impl Fn(&mut [Reg], &mut Memory) -> ExecResult {
+    pub fn executor(&self) -> impl Fn(&mut [Reg], &mut Memory) -> ExecResult<Utarget> {
         |regs, mem| {
             let mut result = Ok(());
-            self.raw_func()(regs.as_mut_ptr(), mem, &raw mut result);
-            result
+            let new_pc = self.raw_func()(regs.as_mut_ptr(), mem, &raw mut result);
+            result.map(|_| new_pc)
         }
     }
 }
@@ -135,13 +136,16 @@ impl<R: Relocation> BasicBlock<R> {
 impl CPUState {
     pub fn execute(&mut self, bb: &BasicBlock<X64Relocation>) -> ExecResult<Utarget> {
         let Self { regs, mem, .. } = self;
-        bb.executor()(regs, mem)?;
-        self.jump_rel((bb.cmds_cnt * CMD_SIZE).cast_signed())
+        let new_pc = bb.executor()(regs, mem)?;
+        self.jump_abs(new_pc)
     }
 }
 
 impl Emit<X64Relocation> for Nor {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         let asm = &mut bbb.asm;
         my_disasm!(asm
         ;; load!(asm, eax, self.get_rs())
@@ -151,12 +155,15 @@ impl Emit<X64Relocation> for Nor {
         ;; store!(asm, self.get_rd(), eax)
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for Ldp {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         #[derive(Debug, Default)]
         #[repr(C)]
         struct Pair(Utarget, Utarget);
@@ -211,12 +218,15 @@ impl Emit<X64Relocation> for Ldp {
         ;; store!(asm, self.get_rt2(), eax)
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for Cbit {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         let asm = &mut bbb.asm;
         let mask: Utarget = !(1 << self.get_imm5());
         my_disasm!(asm
@@ -225,41 +235,52 @@ impl Emit<X64Relocation> for Cbit {
         ;; store!(asm, self.get_rd(), eax)
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for Bdep {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
-        unsafe extern "sysv64" fn bdep_helper(value: Utarget, mask: Utarget) -> Utarget {
-            bit_deposit(value, mask)
-        }
-
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         let asm = &mut bbb.asm;
         my_disasm!(asm
-        ;  push a_regs
-        ;  push a_mem
-        ;  push a_result
+        ;; load!(asm, r8d, self.get_rs1())
+        ;; load!(asm, r9d, self.get_rs2())
 
-        ;; load!(asm, edx, self.get_rs1())
-        ;; load!(asm, ecx, self.get_rs2())
-        ;  mov edi, edx
-        ;  mov esi, ecx
-        ;  mov rax, QWORD bdep_helper as _
-        ;  call rax
+        ;  xor eax, eax         // result
+        ;  test r9d, r9d
+        ;  jz ->finish
 
-        ;  pop a_result
-        ;  pop a_mem
-        ;  pop a_regs
+        ;  ->iter:
+        ;  blsi r10d, r9d       // lowest bit mask
+        ;  sub  r9d, r10d
+
+        ;  mov r11d, r8d        // value lower bit
+        ;  and r11d, 1
+        ;  neg r11d
+        ;  shr r8d, 1
+
+        ;  and r10d, r11d
+        ;  or eax, r10d
+
+        ;  test r9d, r9d
+        ;  jnz ->iter
+
+        ;  ->finish:
         ;; store!(asm, self.get_rd(), eax)
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for Add {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         let asm = &mut bbb.asm;
         my_disasm!(asm
         ;; load!(asm, eax, self.get_rs())
@@ -268,12 +289,15 @@ impl Emit<X64Relocation> for Add {
         ;; store!(asm, self.get_rd(), eax)
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for Ssat {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         let asm = &mut bbb.asm;
         let bits = self.get_imm5();
         let min_bound = Itarget::min_value().unbounded_shr(Itarget::BITS - bits);
@@ -281,21 +305,24 @@ impl Emit<X64Relocation> for Ssat {
 
         my_disasm!(asm
         ;; load!(asm, eax, self.get_rs())
-        ; mov ecx, min_bound as _
-        ; cmp eax, ecx
-        ; cmovl eax, ecx
-        ; mov ecx, max_bound as _
-        ; cmp eax, ecx
-        ; cmovg eax, ecx
+        ;  mov ecx, min_bound as _
+        ;  cmp eax, ecx
+        ;  cmovl eax, ecx
+        ;  mov ecx, max_bound as _
+        ;  cmp eax, ecx
+        ;  cmovg eax, ecx
         ;; store!(asm, self.get_rd(), eax)
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for St {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         fn store_helper_impl(mem: &mut Memory, addr: Utarget, value: Utarget) -> ExecResult {
             if (addr % WORD_SIZE) != 0 {
                 return execution_error("Misaligned store".into());
@@ -339,12 +366,15 @@ impl Emit<X64Relocation> for St {
         ;  pop a_regs
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for Clz {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         let asm = &mut bbb.asm;
         my_disasm!(asm
         ;; load!(asm, eax, self.get_rs())
@@ -352,18 +382,39 @@ impl Emit<X64Relocation> for Clz {
         ;; store!(asm, self.get_rd(), eax)
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for Bne {
-    fn emit(&self, _: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
-        Ok(EmitStatus::Rejected)
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
+        let asm = &mut bbb.asm;
+        let new_pc = bbb
+            .pc
+            .wrapping_add_signed(self.get_offset() * CMD_SIZE.cast_signed());
+        my_disasm!(asm
+        ;; load!(asm, ecx, self.get_rs())
+        ;; load!(asm, r8d, self.get_rt())
+        ;  cmp ecx, r8d
+        ;  je ->bfalse
+        ;  mov eax, new_pc as _
+        ;  ret
+        ;  ->bfalse:
+        );
+
+        bbb.pc += CMD_SIZE;
+        bbb.finilize().map(EmitStatus::Terminated)
     }
 }
 
 impl Emit<X64Relocation> for Ld {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         fn load_helper_impl(mem: &mut Memory, addr: Utarget) -> ExecResult<Utarget> {
             if (addr % WORD_SIZE) != 0 {
                 return execution_error("Misaligned store".into());
@@ -409,12 +460,15 @@ impl Emit<X64Relocation> for Ld {
         ;; store!(asm, self.get_rt(), eax)
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for Xor {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
         let asm = &mut bbb.asm;
         my_disasm!(asm
         ;; load!(asm, eax, self.get_rs())
@@ -423,30 +477,106 @@ impl Emit<X64Relocation> for Xor {
         ;; store!(asm, self.get_rd(), eax)
         );
 
-        Ok(EmitStatus::Accepted)
+        Ok(EmitStatus::Accepted(bbb))
     }
 }
 
 impl Emit<X64Relocation> for Syscall {
-    fn emit(&self, _: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
-        Ok(EmitStatus::Rejected)
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
+        fn syscall_helper_impl(regs: &mut [Reg], _: &mut Memory) -> ExecResult<Utarget> {
+            let code_num = regs[SYSCALL_CODE as usize].read()?;
+            let Ok(code) = SysCallCode::try_from_primitive(code_num) else {
+                return execution_error(format!("Unknown syscall with code 0x{:x}", code_num));
+            };
+            let args = [
+                regs[SYSCALL_ARG0 as usize].read()?,
+                regs[SYSCALL_ARG1 as usize].read()?,
+                regs[SYSCALL_ARG2 as usize].read()?,
+                regs[SYSCALL_ARG3 as usize].read()?,
+                regs[SYSCALL_ARG4 as usize].read()?,
+                regs[SYSCALL_ARG5 as usize].read()?,
+                regs[SYSCALL_ARG6 as usize].read()?,
+                regs[SYSCALL_ARG7 as usize].read()?,
+            ];
+
+            let res = code.call(&args)?;
+            regs[SYSCALL_RET0 as usize].write(res)?;
+
+            Ok(res)
+        }
+
+        unsafe extern "sysv64" fn syscall_helper(
+            regs: *mut Reg,
+            mem: *mut Memory,
+            result: *mut ExecResult,
+        ) -> Utarget {
+            unsafe {
+                match syscall_helper_impl(
+                    std::slice::from_raw_parts_mut(regs, REGS_CNT as _),
+                    mem.as_mut().unwrap(),
+                ) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        *result = Err(err);
+                        Utarget::default()
+                    }
+                }
+            }
+        }
+
+        let asm = &mut bbb.asm;
+        my_disasm!(asm
+        ;  mov rax, QWORD syscall_helper as _
+        ;  jmp rax
+        );
+
+        bbb.finilize().map(EmitStatus::Terminated)
     }
 }
 
 impl Emit<X64Relocation> for Beq {
-    fn emit(&self, _: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
-        Ok(EmitStatus::Rejected)
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
+        let asm = &mut bbb.asm;
+        let new_pc = bbb
+            .pc
+            .wrapping_add_signed(self.get_offset() * CMD_SIZE.cast_signed());
+        my_disasm!(asm
+        ;; load!(asm, ecx, self.get_rs())
+        ;; load!(asm, r8d, self.get_rt())
+        ;  cmp ecx, r8d
+        ;  jne ->bfalse
+        ;  mov eax, new_pc as _
+        ;  ret
+        ;  ->bfalse:
+        );
+
+        bbb.pc += CMD_SIZE;
+        bbb.finilize().map(EmitStatus::Terminated)
     }
 }
 
 impl Emit<X64Relocation> for J {
-    fn emit(&self, _: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
-        Ok(EmitStatus::Rejected)
+    fn emit(
+        &self,
+        mut bbb: BasicBlockBuilder<X64Relocation>,
+    ) -> ExecResult<EmitStatus<X64Relocation>> {
+        let pc = bbb.pc;
+        let mask = 0b00001111111111111111111111111111;
+        let new_addr = pc & !mask | (self.get_index() * CMD_SIZE) & mask;
+
+        bbb.pc = new_addr;
+        bbb.finilize().map(EmitStatus::Terminated)
     }
 }
 
 impl Emit<X64Relocation> for Instr {
-    fn emit(&self, bbb: &mut BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus> {
+    fn emit(&self, bbb: BasicBlockBuilder<X64Relocation>) -> ExecResult<EmitStatus<X64Relocation>> {
         match self {
             Instr::Nor(cmd) => cmd.emit(bbb),
             Instr::Ldp(cmd) => cmd.emit(bbb),
@@ -472,24 +602,46 @@ mod tests {
 
     use super::*;
 
-    fn execute_one<T: Emit<X64Relocation>>(cpu: &mut CPUState, cmd: &T) {
-        let mut bbb = BasicBlockBuilder::new().unwrap();
-        assert_eq!(bbb.emit(cmd).unwrap(), EmitStatus::Accepted);
-        let bb = bbb.finilize().unwrap();
-        let pc = cpu.pc();
-        assert_eq!(cpu.execute(&bb).unwrap(), pc + 4);
+    fn execute_accepted<T: Emit<X64Relocation>>(cpu: &mut CPUState, cmd: &T) {
+        let bbb = BasicBlockBuilder::new(cpu).unwrap();
+
+        if let EmitStatus::Accepted(bbb) = bbb.emit(cmd).unwrap() {
+            let bb = bbb.finilize().unwrap();
+            let pc = cpu.pc();
+            assert_eq!(cpu.execute(&bb).unwrap(), pc + 4);
+            assert_eq!(cpu.pc(), pc + 4);
+        } else {
+            panic!("Accepted status expected");
+        }
     }
 
-    fn execute_fail<T: Emit<X64Relocation>>(cpu: &mut CPUState, cmd: &T) {
-        let mut bbb = BasicBlockBuilder::new().unwrap();
-        assert_eq!(bbb.emit(cmd).unwrap(), EmitStatus::Accepted);
-        let bb = bbb.finilize().unwrap();
-        assert!(cpu.execute(&bb).is_err());
+    fn execute_accepted_fail<T: Emit<X64Relocation>>(cpu: &mut CPUState, cmd: &T) {
+        let bbb = BasicBlockBuilder::new(cpu).unwrap();
+        if let EmitStatus::Accepted(bbb) = bbb.emit(cmd).unwrap() {
+            let bb = bbb.finilize().unwrap();
+            assert!(cpu.execute(&bb).is_err());
+        } else {
+            panic!("Accepted status expected");
+        }
     }
 
-    fn execute_rejected<T: Emit<X64Relocation>>(cmd: &T) {
-        let mut bbb = BasicBlockBuilder::new().unwrap();
-        assert_eq!(bbb.emit(cmd).unwrap(), EmitStatus::Rejected);
+    fn execute_terminated<T: Emit<X64Relocation>>(cpu: &mut CPUState, cmd: &T, new_pc: Utarget) {
+        let bbb = BasicBlockBuilder::new(cpu).unwrap();
+        if let EmitStatus::Terminated(bb) = bbb.emit(cmd).unwrap() {
+            assert_eq!(cpu.execute(&bb).unwrap(), new_pc);
+            assert_eq!(cpu.pc(), new_pc);
+        } else {
+            panic!("Terminated status expected");
+        }
+    }
+
+    fn execute_terminated_fail<T: Emit<X64Relocation>>(cpu: &mut CPUState, cmd: &T) {
+        let bbb = BasicBlockBuilder::new(cpu).unwrap();
+        if let EmitStatus::Terminated(bb) = bbb.emit(cmd).unwrap() {
+            assert!(cpu.execute(&bb).is_err());
+        } else {
+            panic!("Terminated status expected");
+        }
     }
 
     fn create_cpu() -> CPUState {
@@ -511,7 +663,7 @@ mod tests {
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let nor = Nor::from_fields(RD_IDX, RT_IDX, RS_IDX);
-        execute_one(&mut cpu, &nor);
+        execute_accepted(&mut cpu, &nor);
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -543,7 +695,7 @@ mod tests {
         cpu.reg_mut(BASE_IDX).unwrap().write(BASE_ADDR).unwrap();
 
         let ldp = Ldp::from_fields(OFFSET, RT2_IDX, RT1_IDX, BASE_IDX);
-        execute_one(&mut cpu, &ldp);
+        execute_accepted(&mut cpu, &ldp);
 
         let value1 = cpu.reg(RT1_IDX).unwrap().read().unwrap();
         let value2 = cpu.reg(RT2_IDX).unwrap().read().unwrap();
@@ -567,7 +719,7 @@ mod tests {
             .unwrap();
 
         let ldp = Ldp::from_fields(OFFSET, RT2_IDX, RT1_IDX, BASE_IDX);
-        execute_fail(&mut cpu, &ldp);
+        execute_accepted_fail(&mut cpu, &ldp);
     }
 
     #[test]
@@ -585,7 +737,7 @@ mod tests {
             .unwrap();
 
         let ldp = Ldp::from_fields(OFFSET, RT2_IDX, RT1_IDX, BASE_IDX);
-        execute_fail(&mut cpu, &ldp);
+        execute_accepted_fail(&mut cpu, &ldp);
     }
 
     #[test]
@@ -603,7 +755,7 @@ mod tests {
             .unwrap();
 
         let ldp = Ldp::from_fields(OFFSET, RT2_IDX, RT1_IDX, BASE_IDX);
-        execute_one(&mut cpu, &ldp);
+        execute_accepted(&mut cpu, &ldp);
     }
 
     #[test]
@@ -618,7 +770,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let cbit = Cbit::from_fields(BIT_TO_CLEAR, RS_IDX, RD_IDX);
-        execute_one(&mut cpu, &cbit);
+        execute_accepted(&mut cpu, &cbit);
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -636,7 +788,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let cbit = Cbit::from_fields(BIT_TO_CLEAR, RS_IDX, RD_IDX);
-        execute_one(&mut cpu, &cbit);
+        execute_accepted(&mut cpu, &cbit);
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -647,19 +799,27 @@ mod tests {
         const RS1_IDX: Utarget = 1;
         const RS2_IDX: Utarget = 2;
         const RD_IDX: Utarget = 3;
-        const RS1_VALUE: Utarget = 0x239;
-        const RS2_VALUE: Utarget = 0x00ff00ff;
-        const EXPECTED_RESULT: Utarget = 0x20039;
-
+        let params: &[(Utarget, Utarget)] = &[
+            (239, 0),
+            (0, 239),
+            (0xffffffff, 0),
+            (0, 0xffffffff),
+            (0b101010, 0b010101),
+            (0b101, 0b1001001),
+            (0x239, 0xffffffff),
+            (0x239, 0x00ff00ff),
+        ];
         let mut cpu = create_cpu();
-        cpu.reg_mut(RS1_IDX).unwrap().write(RS1_VALUE).unwrap();
-        cpu.reg_mut(RS2_IDX).unwrap().write(RS2_VALUE).unwrap();
+        for (value, mask) in params.into_iter().copied() {
+            cpu.reg_mut(RS1_IDX).unwrap().write(value).unwrap();
+            cpu.reg_mut(RS2_IDX).unwrap().write(mask).unwrap();
 
-        let bdep = Bdep::from_fields(RS2_IDX, RS1_IDX, RD_IDX);
-        execute_one(&mut cpu, &bdep);
+            let bdep = Bdep::from_fields(RS2_IDX, RS1_IDX, RD_IDX);
+            execute_accepted(&mut cpu, &bdep);
 
-        let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
-        assert_eq!(result, EXPECTED_RESULT);
+            let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
+            assert_eq!(result, bit_deposit(value, mask));
+        }
     }
 
     #[test]
@@ -677,7 +837,7 @@ mod tests {
 
         let add = Add::from_fields(RD_IDX, RT_IDX, RS_IDX);
 
-        execute_one(&mut cpu, &add);
+        execute_accepted(&mut cpu, &add);
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -698,7 +858,7 @@ mod tests {
 
         let add = Add::from_fields(RD_IDX, RT_IDX, RS_IDX);
 
-        execute_one(&mut cpu, &add);
+        execute_accepted(&mut cpu, &add);
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -730,7 +890,7 @@ mod tests {
                 .unwrap();
 
             let ssat = Ssat::from_fields(bits, RS_IDX, RD_IDX);
-            execute_one(&mut cpu, &ssat);
+            execute_accepted(&mut cpu, &ssat);
 
             let result = cpu.reg(RD_IDX).unwrap().read().unwrap().cast_signed();
             assert_eq!(result, saturate_signed(val, bits));
@@ -750,7 +910,7 @@ mod tests {
         cpu.reg_mut(RT_IDX).unwrap().write(STORE_VALUE).unwrap();
 
         let st = St::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        execute_one(&mut cpu, &st);
+        execute_accepted(&mut cpu, &st);
 
         let mut buffer = [0u8; 4];
         cpu.mem()
@@ -776,7 +936,7 @@ mod tests {
             .unwrap();
 
         let st = St::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        execute_fail(&mut cpu, &st);
+        execute_accepted_fail(&mut cpu, &st);
     }
 
     #[test]
@@ -793,7 +953,7 @@ mod tests {
             .unwrap();
 
         let st = St::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        execute_fail(&mut cpu, &st);
+        execute_accepted_fail(&mut cpu, &st);
     }
 
     #[test]
@@ -810,7 +970,7 @@ mod tests {
             .unwrap();
 
         let st = St::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        execute_one(&mut cpu, &st);
+        execute_accepted(&mut cpu, &st);
     }
 
     #[test]
@@ -824,7 +984,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let clz = Clz::from_fields(RS_IDX, RD_IDX);
-        execute_one(&mut cpu, &clz);
+        execute_accepted(&mut cpu, &clz);
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -841,7 +1001,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let clz = Clz::from_fields(RS_IDX, RD_IDX);
-        execute_one(&mut cpu, &clz);
+        execute_accepted(&mut cpu, &clz);
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -858,7 +1018,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let clz = Clz::from_fields(RS_IDX, RD_IDX);
-        execute_one(&mut cpu, &clz);
+        execute_accepted(&mut cpu, &clz);
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -873,11 +1033,13 @@ mod tests {
         const OFFSET: Itarget = 4;
 
         let mut cpu = create_cpu();
+        let initial_pc = cpu.pc();
+        let next_pc = initial_pc.wrapping_add((OFFSET as Utarget) << 2);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let bne = Bne::from_fields(OFFSET, RT_IDX, RS_IDX);
-        execute_rejected(&bne);
+        execute_terminated(&mut cpu, &bne, next_pc);
     }
 
     #[test]
@@ -889,11 +1051,29 @@ mod tests {
         const OFFSET: Itarget = 4;
 
         let mut cpu = create_cpu();
+        let next_pc = 4;
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let bne = Bne::from_fields(OFFSET, RT_IDX, RS_IDX);
-        execute_rejected(&bne);
+        execute_terminated(&mut cpu, &bne, next_pc);
+    }
+
+    #[test]
+    fn test_bne_instruction_self_jump() {
+        const RS_IDX: Utarget = 1;
+        const RT_IDX: Utarget = 2;
+        const RS_VALUE: Utarget = 10;
+        const RT_VALUE: Utarget = 20;
+        const OFFSET: Itarget = 0;
+
+        let mut cpu = create_cpu();
+        let initial_pc = cpu.pc();
+        cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
+        cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
+
+        let bne = Bne::from_fields(OFFSET, RT_IDX, RS_IDX);
+        execute_terminated(&mut cpu, &bne, initial_pc);
     }
 
     #[test]
@@ -915,7 +1095,7 @@ mod tests {
         cpu.reg_mut(BASE_IDX).unwrap().write(BASE_ADDR).unwrap();
 
         let ld = Ld::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        execute_one(&mut cpu, &ld);
+        execute_accepted(&mut cpu, &ld);
 
         let result = cpu.reg(RT_IDX).unwrap().read().unwrap();
         assert_eq!(result, MEM_VALUE);
@@ -932,7 +1112,7 @@ mod tests {
         cpu.reg_mut(BASE_IDX).unwrap().write(BASE_ADDR).unwrap();
 
         let ld = Ld::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        execute_fail(&mut cpu, &ld);
+        execute_accepted_fail(&mut cpu, &ld);
     }
 
     #[test]
@@ -946,7 +1126,7 @@ mod tests {
         cpu.reg_mut(BASE_IDX).unwrap().write(BASE_ADDR).unwrap();
 
         let ld = Ld::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        execute_fail(&mut cpu, &ld);
+        execute_accepted_fail(&mut cpu, &ld);
     }
 
     #[test]
@@ -960,7 +1140,7 @@ mod tests {
         cpu.reg_mut(BASE_IDX).unwrap().write(BASE_ADDR).unwrap();
 
         let ld = Ld::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        execute_one(&mut cpu, &ld);
+        execute_accepted(&mut cpu, &ld);
     }
 
     #[test]
@@ -977,7 +1157,7 @@ mod tests {
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let xor = Xor::from_fields(RD_IDX, RT_IDX, RS_IDX);
-        execute_one(&mut cpu, &xor);
+        execute_accepted(&mut cpu, &xor);
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -985,8 +1165,9 @@ mod tests {
 
     #[test]
     fn test_syscall_instruction() {
+        let mut cpu = create_cpu();
         let syscall = Syscall::from_fields(0);
-        execute_rejected(&syscall);
+        execute_terminated_fail(&mut cpu, &syscall);
     }
 
     #[test]
@@ -998,11 +1179,30 @@ mod tests {
         const OFFSET: Itarget = 4;
 
         let mut cpu = create_cpu();
+        let initial_pc = cpu.pc();
+        let next_pc = initial_pc.wrapping_add((OFFSET as Utarget) << 2);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let beq = Beq::from_fields(OFFSET, RT_IDX, RS_IDX);
-        execute_rejected(&beq);
+        execute_terminated(&mut cpu, &beq, next_pc);
+    }
+
+    #[test]
+    fn test_beq_instruction_self_jump() {
+        const RS_IDX: Utarget = 1;
+        const RT_IDX: Utarget = 2;
+        const RS_VALUE: Utarget = 10;
+        const RT_VALUE: Utarget = 10;
+        const OFFSET: Itarget = 0;
+
+        let mut cpu = create_cpu();
+        let initial_pc = cpu.pc();
+        cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
+        cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
+
+        let beq = Beq::from_fields(OFFSET, RT_IDX, RS_IDX);
+        execute_terminated(&mut cpu, &beq, initial_pc);
     }
 
     #[test]
@@ -1014,17 +1214,51 @@ mod tests {
         const OFFSET: Itarget = 4;
 
         let mut cpu = create_cpu();
+        let next_pc = 4;
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let beq = Beq::from_fields(OFFSET, RT_IDX, RS_IDX);
-        execute_rejected(&beq);
+        execute_terminated(&mut cpu, &beq, next_pc);
     }
 
     #[test]
     fn test_j_instruction() {
+        let mut cpu = create_cpu();
+        {
+            const JUMP_INDEX: u32 = 0x3ffffff;
+            const EXPECTED_ADDR: Utarget = 0xffffffc;
+
+            let j = J::from_fields(JUMP_INDEX);
+            execute_terminated(&mut cpu, &j, EXPECTED_ADDR);
+        }
+        {
+            let xor = Xor::from_fields(0, 0, 0);
+            execute_accepted(&mut cpu, &xor);
+        }
+        {
+            const JUMP_INDEX: u32 = 0x3ffffff;
+            const EXPECTED_ADDR: Utarget = 0x1ffffffc;
+
+            let j = J::from_fields(JUMP_INDEX);
+            execute_terminated(&mut cpu, &j, EXPECTED_ADDR);
+        }
+        {
+            const JUMP_INDEX: u32 = 0x0;
+            const EXPECTED_ADDR: Utarget = 0x10000000;
+
+            let j = J::from_fields(JUMP_INDEX);
+            execute_terminated(&mut cpu, &j, EXPECTED_ADDR);
+        }
+    }
+
+    #[test]
+    fn test_j_instruction_self_jump() {
         const JUMP_INDEX: u32 = 0x0;
+        const EXPECTED_ADDR: Utarget = 0x0;
+
+        let mut cpu = create_cpu();
         let j = J::from_fields(JUMP_INDEX);
-        execute_rejected(&j);
+        execute_terminated(&mut cpu, &j, EXPECTED_ADDR);
     }
 }
