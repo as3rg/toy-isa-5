@@ -1,4 +1,7 @@
-use std::{fmt, io};
+use std::{
+    fmt, io,
+    ops::{Add, AddAssign, Neg, Sub, SubAssign},
+};
 
 pub type Utarget = u32;
 pub type Itarget = i32;
@@ -23,7 +26,7 @@ pub const SYSCALL_RET0: Utarget = 0;
 
 #[derive(Debug)]
 pub enum ExecError {
-    InterpretationError { msg: String, addr: Utarget },
+    InterpretationError { msg: String, addr: Pc },
     JitExecutionError { msg: String },
     IOError(io::Error),
     Exit { exit_code: Utarget },
@@ -33,7 +36,7 @@ impl fmt::Display for ExecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ExecError::InterpretationError { msg, addr } => {
-                write!(f, "Interpretation error at address 0x{:x}: {}", addr, msg)
+                write!(f, "Interpretation error at address 0x{:x}: {}", addr.0, msg)
             }
             ExecError::JitExecutionError { msg } => {
                 write!(f, "JIT execution error: {}", msg)
@@ -49,3 +52,73 @@ impl fmt::Display for ExecError {
 }
 
 pub type ExecResult<T = ()> = Result<T, ExecError>;
+
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
+pub struct Pc(pub Utarget);
+
+#[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub struct PcOffset(pub Itarget);
+
+impl Add<PcOffset> for Pc {
+    type Output = Pc;
+
+    fn add(self, rhs: PcOffset) -> Self::Output {
+        Self(self.0.wrapping_add_signed(rhs.0))
+    }
+}
+
+impl AddAssign<PcOffset> for Pc {
+    fn add_assign(&mut self, rhs: PcOffset) {
+        *self = *self + rhs;
+    }
+}
+
+impl Sub<PcOffset> for Pc {
+    type Output = Pc;
+
+    fn sub(self, rhs: PcOffset) -> Self::Output {
+        self + -rhs
+    }
+}
+
+impl SubAssign<PcOffset> for Pc {
+    fn sub_assign(&mut self, rhs: PcOffset) {
+        *self = *self - rhs;
+    }
+}
+
+impl Neg for PcOffset {
+    type Output = PcOffset;
+
+    fn neg(self) -> Self::Output {
+        Self(self.0.wrapping_neg())
+    }
+}
+
+impl Add for PcOffset {
+    type Output = PcOffset;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0.wrapping_add(rhs.0))
+    }
+}
+
+impl AddAssign for PcOffset {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+impl Sub for PcOffset {
+    type Output = PcOffset;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        self + -rhs
+    }
+}
+
+impl SubAssign for PcOffset {
+    fn sub_assign(&mut self, rhs: Self) {
+        *self = *self - rhs;
+    }
+}

@@ -6,20 +6,20 @@ use std::{
 use crate::{
     cpu::CPUState,
     decoder::parse_instr,
-    globals::{CMD_SIZE, ExecError, ExecResult, Utarget},
+    globals::{CMD_SIZE, ExecError, ExecResult, Pc, Utarget},
     jit::{BasicBlockBuilder, EmitStatus},
 };
 
 pub fn interpret<Cmds: Read + Seek>(
     cpu: &mut CPUState,
     cmds: &mut Cmds,
-    entry_point: Utarget,
+    entry_point: Pc,
 ) -> ExecResult {
     cpu.jump_abs(entry_point)?;
 
     loop {
         // Seek
-        cmds.seek(SeekFrom::Start(cpu.pc() as _))
+        cmds.seek(SeekFrom::Start(cpu.pc().0 as _))
             .map_err(ExecError::IOError)?;
 
         // Read command
@@ -42,7 +42,7 @@ pub fn interpret<Cmds: Read + Seek>(
 pub fn execute<Cmds: Read + Seek>(
     cpu: &mut CPUState,
     cmds: &mut Cmds,
-    entry_point: Utarget,
+    entry_point: Pc,
 ) -> ExecResult {
     let mut bb_cache = HashMap::new();
 
@@ -53,14 +53,14 @@ pub fn execute<Cmds: Read + Seek>(
 
         // Check cache
         if let Some(bb) = bb_cache.get(&pc) {
-            log::debug!("pc: 0x{:08x} | executing cached basic block", pc);
+            log::debug!("pc: 0x{:08x} | executing cached basic block", pc.0);
             let new_pc = cpu.execute(&bb)?;
-            log::debug!("pc: 0x{:08x} | exiting cached basic block", new_pc);
+            log::debug!("pc: 0x{:08x} | exiting cached basic block", new_pc.0);
             continue;
         }
 
         // Seek
-        cmds.seek(SeekFrom::Start(pc as _))
+        cmds.seek(SeekFrom::Start(pc.0 as _))
             .map_err(ExecError::IOError)?;
 
         let mut bbb = BasicBlockBuilder::new(cpu)?;
@@ -81,9 +81,9 @@ pub fn execute<Cmds: Read + Seek>(
             bbb = match bbb.emit(&cmd)? {
                 EmitStatus::Accepted(bbb) => bbb,
                 EmitStatus::Terminated(bb) => {
-                    log::debug!("pc: 0x{:08x} | executing new basic block", pc);
+                    log::debug!("pc: 0x{:08x} | executing new basic block", pc.0);
                     let new_pc = cpu.execute(&bb)?;
-                    log::debug!("pc: 0x{:08x} | exiting new basic block", new_pc);
+                    log::debug!("pc: 0x{:08x} | exiting new basic block", new_pc.0);
 
                     bb_cache.insert(pc, bb);
                     break;

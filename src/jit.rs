@@ -10,9 +10,9 @@ use crate::{
     cmds::*,
     cpu::{CPUState, Reg, SysCallCode},
     globals::{
-        CMD_SIZE, ExecError, ExecResult, Itarget, REGS_CNT, SYSCALL_ARG0, SYSCALL_ARG1,
-        SYSCALL_ARG2, SYSCALL_ARG3, SYSCALL_ARG4, SYSCALL_ARG5, SYSCALL_ARG6, SYSCALL_ARG7,
-        SYSCALL_CODE, SYSCALL_RET0, Utarget, WORD_SIZE,
+        CMD_SIZE, ExecError, ExecResult, Itarget, Pc, PcOffset, REGS_CNT, SYSCALL_ARG0,
+        SYSCALL_ARG1, SYSCALL_ARG2, SYSCALL_ARG3, SYSCALL_ARG4, SYSCALL_ARG5, SYSCALL_ARG6,
+        SYSCALL_ARG7, SYSCALL_CODE, SYSCALL_RET0, Utarget, WORD_SIZE,
     },
     memory::Memory,
 };
@@ -21,7 +21,7 @@ use crate::{
 pub struct BasicBlockBuilder<R: Relocation> {
     asm: Assembler<R>,
     start: AssemblyOffset,
-    pc: Utarget,
+    pc: Pc,
 }
 
 #[derive(Debug)]
@@ -97,7 +97,7 @@ where
     pub fn emit<T: Emit<R>>(self, cmd: &T) -> ExecResult<EmitStatus<R>> {
         match cmd.emit(self) {
             Ok(EmitStatus::Accepted(mut bbb)) => {
-                bbb.pc += CMD_SIZE;
+                bbb.pc += PcOffset(CMD_SIZE as _);
                 Ok(EmitStatus::Accepted(bbb))
             }
             x => x,
@@ -107,7 +107,7 @@ where
     pub fn finilize(self) -> ExecResult<BasicBlock<R>> {
         let mut asm = self.asm;
         my_disasm!(asm
-        ; mov eax, (self.pc) as _
+        ; mov eax, (self.pc.0) as _
         ; ret
         );
 
@@ -124,17 +124,18 @@ impl<R: Relocation> BasicBlock<R> {
         unsafe { mem::transmute(self.buf.ptr(self.start)) }
     }
 
-    pub fn executor(&self) -> impl Fn(&mut [Reg], &mut Memory) -> ExecResult<Utarget> {
+    pub fn executor(&self) -> impl Fn(&mut [Reg], &mut Memory) -> ExecResult<Pc> {
         |regs, mem| {
             let mut result = Ok(());
             let new_pc = self.raw_func()(regs.as_mut_ptr(), mem, &raw mut result);
-            result.map(|_| new_pc)
+            let () = result?;
+            Ok(Pc(new_pc))
         }
     }
 }
 
 impl CPUState {
-    pub fn execute(&mut self, bb: &BasicBlock<X64Relocation>) -> ExecResult<Utarget> {
+    pub fn execute(&mut self, bb: &BasicBlock<X64Relocation>) -> ExecResult<Pc> {
         let Self { regs, mem, .. } = self;
         let new_pc = bb.executor()(regs, mem)?;
         self.jump_abs(new_pc)
@@ -392,20 +393,18 @@ impl Emit<X64Relocation> for Bne {
         mut bbb: BasicBlockBuilder<X64Relocation>,
     ) -> ExecResult<EmitStatus<X64Relocation>> {
         let asm = &mut bbb.asm;
-        let new_pc = bbb
-            .pc
-            .wrapping_add_signed(self.get_offset() * CMD_SIZE.cast_signed());
+        let new_pc = bbb.pc + PcOffset(self.get_offset() * CMD_SIZE.cast_signed());
         my_disasm!(asm
         ;; load!(asm, ecx, self.get_rs())
         ;; load!(asm, r8d, self.get_rt())
         ;  cmp ecx, r8d
         ;  je ->bfalse
-        ;  mov eax, new_pc as _
+        ;  mov eax, new_pc.0 as _
         ;  ret
         ;  ->bfalse:
         );
 
-        bbb.pc += CMD_SIZE;
+        bbb.pc += PcOffset(CMD_SIZE as _);
         bbb.finilize().map(EmitStatus::Terminated)
     }
 }
@@ -543,20 +542,18 @@ impl Emit<X64Relocation> for Beq {
         mut bbb: BasicBlockBuilder<X64Relocation>,
     ) -> ExecResult<EmitStatus<X64Relocation>> {
         let asm = &mut bbb.asm;
-        let new_pc = bbb
-            .pc
-            .wrapping_add_signed(self.get_offset() * CMD_SIZE.cast_signed());
+        let new_pc = bbb.pc + PcOffset(self.get_offset() * CMD_SIZE.cast_signed());
         my_disasm!(asm
         ;; load!(asm, ecx, self.get_rs())
         ;; load!(asm, r8d, self.get_rt())
         ;  cmp ecx, r8d
         ;  jne ->bfalse
-        ;  mov eax, new_pc as _
+        ;  mov eax, new_pc.0 as _
         ;  ret
         ;  ->bfalse:
         );
 
-        bbb.pc += CMD_SIZE;
+        bbb.pc += PcOffset(CMD_SIZE as _);
         bbb.finilize().map(EmitStatus::Terminated)
     }
 }
@@ -568,7 +565,7 @@ impl Emit<X64Relocation> for J {
     ) -> ExecResult<EmitStatus<X64Relocation>> {
         let pc = bbb.pc;
         let mask = 0b00001111111111111111111111111111;
-        let new_addr = pc & !mask | (self.get_index() * CMD_SIZE) & mask;
+        let new_addr = Pc(pc.0 & !mask | (self.get_index() * CMD_SIZE) & mask);
 
         bbb.pc = new_addr;
         bbb.finilize().map(EmitStatus::Terminated)
@@ -598,7 +595,10 @@ impl Emit<X64Relocation> for Instr {
 
 #[cfg(test)]
 mod tests {
-    use crate::{globals::Itarget, helpers::saturate_signed};
+    use crate::{
+        globals::Itarget,
+        helpers::{bit_deposit, saturate_signed},
+    };
 
     use super::*;
 
@@ -608,8 +608,8 @@ mod tests {
         if let EmitStatus::Accepted(bbb) = bbb.emit(cmd).unwrap() {
             let bb = bbb.finilize().unwrap();
             let pc = cpu.pc();
-            assert_eq!(cpu.execute(&bb).unwrap(), pc + 4);
-            assert_eq!(cpu.pc(), pc + 4);
+            assert_eq!(cpu.execute(&bb).unwrap(), pc + PcOffset(4));
+            assert_eq!(cpu.pc(), pc + PcOffset(4));
         } else {
             panic!("Accepted status expected");
         }
@@ -625,7 +625,7 @@ mod tests {
         }
     }
 
-    fn execute_terminated<T: Emit<X64Relocation>>(cpu: &mut CPUState, cmd: &T, new_pc: Utarget) {
+    fn execute_terminated<T: Emit<X64Relocation>>(cpu: &mut CPUState, cmd: &T, new_pc: Pc) {
         let bbb = BasicBlockBuilder::new(cpu).unwrap();
         if let EmitStatus::Terminated(bb) = bbb.emit(cmd).unwrap() {
             assert_eq!(cpu.execute(&bb).unwrap(), new_pc);
@@ -1034,7 +1034,7 @@ mod tests {
 
         let mut cpu = create_cpu();
         let initial_pc = cpu.pc();
-        let next_pc = initial_pc.wrapping_add((OFFSET as Utarget) << 2);
+        let next_pc = initial_pc + PcOffset(OFFSET << 2);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
@@ -1051,7 +1051,7 @@ mod tests {
         const OFFSET: Itarget = 4;
 
         let mut cpu = create_cpu();
-        let next_pc = 4;
+        let next_pc = Pc(4);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
@@ -1180,7 +1180,7 @@ mod tests {
 
         let mut cpu = create_cpu();
         let initial_pc = cpu.pc();
-        let next_pc = initial_pc.wrapping_add((OFFSET as Utarget) << 2);
+        let next_pc = initial_pc + PcOffset(OFFSET << 2);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
@@ -1214,7 +1214,7 @@ mod tests {
         const OFFSET: Itarget = 4;
 
         let mut cpu = create_cpu();
-        let next_pc = 4;
+        let next_pc = Pc(4);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
@@ -1227,7 +1227,7 @@ mod tests {
         let mut cpu = create_cpu();
         {
             const JUMP_INDEX: u32 = 0x3ffffff;
-            const EXPECTED_ADDR: Utarget = 0xffffffc;
+            const EXPECTED_ADDR: Pc = Pc(0xffffffc);
 
             let j = J::from_fields(JUMP_INDEX);
             execute_terminated(&mut cpu, &j, EXPECTED_ADDR);
@@ -1238,14 +1238,14 @@ mod tests {
         }
         {
             const JUMP_INDEX: u32 = 0x3ffffff;
-            const EXPECTED_ADDR: Utarget = 0x1ffffffc;
+            const EXPECTED_ADDR: Pc = Pc(0x1ffffffc);
 
             let j = J::from_fields(JUMP_INDEX);
             execute_terminated(&mut cpu, &j, EXPECTED_ADDR);
         }
         {
             const JUMP_INDEX: u32 = 0x0;
-            const EXPECTED_ADDR: Utarget = 0x10000000;
+            const EXPECTED_ADDR: Pc = Pc(0x10000000);
 
             let j = J::from_fields(JUMP_INDEX);
             execute_terminated(&mut cpu, &j, EXPECTED_ADDR);
@@ -1255,7 +1255,7 @@ mod tests {
     #[test]
     fn test_j_instruction_self_jump() {
         const JUMP_INDEX: u32 = 0x0;
-        const EXPECTED_ADDR: Utarget = 0x0;
+        const EXPECTED_ADDR: Pc = Pc(0x0);
 
         let mut cpu = create_cpu();
         let j = J::from_fields(JUMP_INDEX);

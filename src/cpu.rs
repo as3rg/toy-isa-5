@@ -1,6 +1,6 @@
 use num_enum::TryFromPrimitive;
 
-use crate::globals::{ExecError, ExecResult, Itarget, REGS_CNT, SYSCALL_ARGS_CNT, Utarget};
+use crate::globals::{ExecError, ExecResult, Pc, PcOffset, REGS_CNT, SYSCALL_ARGS_CNT, Utarget};
 
 use crate::memory::Memory;
 
@@ -24,7 +24,7 @@ impl Reg {
 pub struct CPUState {
     pub(crate) regs: [Reg; REGS_CNT as _],
     pub(crate) mem: Memory,
-    pc_value: Utarget,
+    pc_value: Pc,
 }
 
 #[derive(Debug, TryFromPrimitive, PartialEq, Eq, Clone, Copy)]
@@ -58,17 +58,17 @@ impl CPUState {
         Ok(&mut self.mem)
     }
 
-    pub fn jump_rel(&mut self, diff: Itarget) -> ExecResult<Utarget> {
-        self.pc_value = self.pc_value.wrapping_add_signed(diff);
+    pub fn jump_rel(&mut self, diff: PcOffset) -> ExecResult<Pc> {
+        self.pc_value += diff;
         Ok(self.pc_value)
     }
 
-    pub fn jump_abs(&mut self, addr: Utarget) -> ExecResult<Utarget> {
+    pub fn jump_abs(&mut self, addr: Pc) -> ExecResult<Pc> {
         self.pc_value = addr;
         Ok(self.pc_value)
     }
 
-    pub fn pc(&self) -> Utarget {
+    pub fn pc(&self) -> Pc {
         self.pc_value
     }
 

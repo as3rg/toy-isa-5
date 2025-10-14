@@ -2,10 +2,10 @@ use std::fs::File;
 use std::io::BufReader;
 use std::process;
 
-use clap::{Arg, Command};
+use clap::{Arg, Command, builder::TypedValueParser};
 use jit::{
     cpu::CPUState,
-    globals::{ExecError, Utarget},
+    globals::{ExecError, Pc, Utarget},
     runner::{execute, interpret},
 };
 
@@ -34,13 +34,13 @@ fn main() {
                 .long("start")
                 .help("Entry point in a file")
                 .default_value("0")
-                .value_parser(clap::value_parser!(Utarget)),
+                .value_parser(clap::value_parser!(Utarget).map(Pc)),
         )
         .get_matches();
 
     let filename = matches.get_one::<String>("file").unwrap();
     let jit = matches.get_flag("jit");
-    let entry = *matches.get_one::<Utarget>("start").unwrap();
+    let entry = *matches.get_one::<Pc>("start").unwrap();
 
     let mut cpu = CPUState::default();
 

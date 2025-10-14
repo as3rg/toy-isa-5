@@ -6,7 +6,7 @@ use crate::globals::*;
 use crate::helpers::{bit_deposit, saturate_signed};
 
 impl CPUState {
-    pub fn interpret<T: Interpret>(&mut self, cmd: T) -> ExecResult<Utarget> {
+    pub fn interpret<T: Interpret>(&mut self, cmd: T) -> ExecResult<Pc> {
         cmd.interpret(self)?;
         Ok(self.pc())
     }
@@ -14,7 +14,7 @@ impl CPUState {
 
 macro_rules! finish_cmd {
     ($cpu: expr) => {
-        $cpu.jump_rel(CMD_SIZE.cast_signed()).map(|_| ())
+        $cpu.jump_rel(PcOffset(CMD_SIZE.cast_signed())).map(|_| ())
     };
 }
 
@@ -39,7 +39,7 @@ impl Interpret for Nor {
 
         log::debug!(
             "pc: 0x{:08x} | r{} (0x{:x}) <- r{} (0x{:x}) nor r{} (0x{:x})",
-            pc,
+            pc.0,
             self.get_rd(),
             result,
             self.get_rs(),
@@ -76,7 +76,7 @@ impl Interpret for Ldp {
 
         log::debug!(
             "pc: 0x{:08x} | r{} (0x{:x}), r{} (0x{:x}) <- [r{} (0x{:x}) + {}]",
-            pc,
+            pc.0,
             self.get_rt1(),
             val1,
             self.get_rt2(),
@@ -100,7 +100,7 @@ impl Interpret for Cbit {
 
         log::debug!(
             "pc: 0x{:08x} | r{} (0x{:x}) <- r{} (0x{:x}) & !(1 << {})",
-            pc,
+            pc.0,
             self.get_rd(),
             result,
             self.get_rs(),
@@ -122,7 +122,7 @@ impl Interpret for Bdep {
 
         log::debug!(
             "pc: 0x{:08x} | r{} (0x{:x}) <- bit_deposit(r{} (0x{:x}), r{} (0x{:x}))",
-            pc,
+            pc.0,
             self.get_rd(),
             result,
             self.get_rs1(),
@@ -145,7 +145,7 @@ impl Interpret for Add {
 
         log::debug!(
             "pc: 0x{:08x} | r{} (0x{:x}) <- r{} (0x{:x}) + r{} (0x{:x})",
-            pc,
+            pc.0,
             self.get_rd(),
             result,
             self.get_rs(),
@@ -167,7 +167,7 @@ impl Interpret for Ssat {
 
         log::debug!(
             "pc: 0x{:08x} | r{} (0x{:x}) <- saturate_signed(r{} (0x{:x}), 0x{:x})",
-            pc,
+            pc.0,
             self.get_rd(),
             saturated,
             self.get_rs(),
@@ -194,7 +194,7 @@ impl Interpret for St {
 
         log::debug!(
             "pc: 0x{:08x} | [r{} (0x{:x}) + {}] <- r{} (0x{:x})",
-            pc,
+            pc.0,
             self.get_base(),
             base,
             self.get_offset(),
@@ -215,7 +215,7 @@ impl Interpret for Clz {
 
         log::debug!(
             "pc: 0x{:08x} | r{} (0x{:x}) <- leading_zeros(r{} (0x{:x}))",
-            pc,
+            pc.0,
             self.get_rd(),
             leading_zeros,
             self.get_rs(),
@@ -233,21 +233,21 @@ impl Interpret for Bne {
         let rt = cpu.reg(self.get_rt())?.read()?;
 
         if rs != rt {
-            let new_pc = cpu.jump_rel(self.get_offset() * CMD_SIZE.cast_signed())?;
+            let new_pc = cpu.jump_rel(PcOffset(self.get_offset() * CMD_SIZE.cast_signed()))?;
             log::debug!(
                 "pc: 0x{:08x} | bne: r{} (0x{:x}) != r{} (0x{:x}) -> 0x{:x}",
-                pc,
+                pc.0,
                 self.get_rs(),
                 rs,
                 self.get_rt(),
                 rt,
-                new_pc
+                new_pc.0
             );
             Ok(())
         } else {
             log::debug!(
                 "pc: 0x{:08x} | bne: r{} (0x{:x}) != r{} (0x{:x})",
-                pc,
+                pc.0,
                 self.get_rs(),
                 rs,
                 self.get_rt(),
@@ -277,7 +277,7 @@ impl Interpret for Ld {
 
         log::debug!(
             "pc: 0x{:08x} | r{} (0x{:x}) <- [r{} (0x{:x}) + {}]",
-            pc,
+            pc.0,
             self.get_rt(),
             val,
             self.get_base(),
@@ -299,7 +299,7 @@ impl Interpret for Xor {
 
         log::debug!(
             "pc: 0x{:08x} | r{} (0x{:x}) <- r{} (0x{:x}) ^ r{} (0x{:x})",
-            pc,
+            pc.0,
             self.get_rd(),
             result,
             self.get_rs(),
@@ -335,7 +335,7 @@ impl Interpret for Syscall {
 
         log::debug!(
             "pc: 0x{:08x} | syscall: {:?} with args {:?}",
-            pc,
+            pc.0,
             code,
             args
         );
@@ -343,7 +343,7 @@ impl Interpret for Syscall {
         let res = cpu.syscall(code, &args)?;
         cpu.reg_mut(SYSCALL_RET0)?.write(res)?;
 
-        log::debug!("pc: 0x{:08x} | syscall result: 0x{:x}", pc, res);
+        log::debug!("pc: 0x{:08x} | syscall result: 0x{:x}", pc.0, res);
 
         finish_cmd!(cpu)
     }
@@ -356,21 +356,21 @@ impl Interpret for Beq {
         let rt = cpu.reg(self.get_rt())?.read()?;
 
         if rs == rt {
-            let new_pc = cpu.jump_rel(self.get_offset() * CMD_SIZE.cast_signed())?;
+            let new_pc = cpu.jump_rel(PcOffset(self.get_offset() * CMD_SIZE.cast_signed()))?;
             log::debug!(
                 "pc: 0x{:08x} | beq: r{} (0x{:x}) == r{} (0x{:x}) -> 0x{:x}",
-                pc,
+                pc.0,
                 self.get_rs(),
                 rs,
                 self.get_rt(),
                 rt,
-                new_pc
+                new_pc.0
             );
             Ok(())
         } else {
             log::debug!(
                 "pc: 0x{:08x} | beq: r{} (0x{:x}) == r{} (0x{:x})",
-                pc,
+                pc.0,
                 self.get_rs(),
                 rs,
                 self.get_rt(),
@@ -386,12 +386,12 @@ impl Interpret for J {
     fn interpret(&self, cpu: &mut CPUState) -> ExecResult {
         let pc = cpu.pc();
         let mask = 0b00001111111111111111111111111111;
-        let new_addr = cpu.pc() & !mask | (self.get_index() * CMD_SIZE) & mask;
+        let new_addr = Pc(cpu.pc().0 & !mask | (self.get_index() * CMD_SIZE) & mask);
 
         log::debug!(
             "pc: 0x{:08x} | jump to 0x{:x} (index: {})",
-            pc,
-            new_addr,
+            pc.0,
+            new_addr.0,
             self.get_index()
         );
 
@@ -444,7 +444,7 @@ mod tests {
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let nor = Nor::from_fields(RD_IDX, RT_IDX, RS_IDX);
-        assert_eq!(cpu.interpret(nor).unwrap(), 4);
+        assert_eq!(cpu.interpret(nor).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -476,7 +476,7 @@ mod tests {
         cpu.reg_mut(BASE_IDX).unwrap().write(BASE_ADDR).unwrap();
 
         let ldp = Ldp::from_fields(OFFSET, RT2_IDX, RT1_IDX, BASE_IDX);
-        assert_eq!(cpu.interpret(ldp).unwrap(), 4);
+        assert_eq!(cpu.interpret(ldp).unwrap(), Pc(4));
 
         let value1 = cpu.reg(RT1_IDX).unwrap().read().unwrap();
         let value2 = cpu.reg(RT2_IDX).unwrap().read().unwrap();
@@ -557,7 +557,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let cbit = Cbit::from_fields(BIT_TO_CLEAR, RS_IDX, RD_IDX);
-        assert_eq!(cpu.interpret(cbit).unwrap(), 4);
+        assert_eq!(cpu.interpret(cbit).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -575,7 +575,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let cbit = Cbit::from_fields(BIT_TO_CLEAR, RS_IDX, RD_IDX);
-        assert_eq!(cpu.interpret(cbit).unwrap(), 4);
+        assert_eq!(cpu.interpret(cbit).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -595,7 +595,7 @@ mod tests {
         cpu.reg_mut(RS2_IDX).unwrap().write(RS2_VALUE).unwrap();
 
         let bdep = Bdep::from_fields(RS2_IDX, RS1_IDX, RD_IDX);
-        assert_eq!(cpu.interpret(bdep).unwrap(), 4);
+        assert_eq!(cpu.interpret(bdep).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -615,7 +615,7 @@ mod tests {
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let add = Add::from_fields(RD_IDX, RT_IDX, RS_IDX);
-        assert_eq!(cpu.interpret(add).unwrap(), 4);
+        assert_eq!(cpu.interpret(add).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -635,7 +635,7 @@ mod tests {
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let add = Add::from_fields(RD_IDX, RT_IDX, RS_IDX);
-        assert_eq!(cpu.interpret(add).unwrap(), 4);
+        assert_eq!(cpu.interpret(add).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -653,7 +653,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let ssat = Ssat::from_fields(BIT_COUNT, RS_IDX, RD_IDX);
-        assert_eq!(cpu.interpret(ssat).unwrap(), 4);
+        assert_eq!(cpu.interpret(ssat).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -672,7 +672,7 @@ mod tests {
         cpu.reg_mut(RT_IDX).unwrap().write(STORE_VALUE).unwrap();
 
         let st = St::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        assert_eq!(cpu.interpret(st).unwrap(), 4);
+        assert_eq!(cpu.interpret(st).unwrap(), Pc(4));
 
         let mut buffer = [0u8; 4];
         cpu.mem()
@@ -752,7 +752,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let clz = Clz::from_fields(RS_IDX, RD_IDX);
-        assert_eq!(cpu.interpret(clz).unwrap(), 4);
+        assert_eq!(cpu.interpret(clz).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -769,7 +769,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let clz = Clz::from_fields(RS_IDX, RD_IDX);
-        assert_eq!(cpu.interpret(clz).unwrap(), 4);
+        assert_eq!(cpu.interpret(clz).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -786,7 +786,7 @@ mod tests {
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
 
         let clz = Clz::from_fields(RS_IDX, RD_IDX);
-        assert_eq!(cpu.interpret(clz).unwrap(), 4);
+        assert_eq!(cpu.interpret(clz).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -802,7 +802,7 @@ mod tests {
 
         let mut cpu = create_cpu();
         let initial_pc = cpu.pc();
-        let next_pc = initial_pc.wrapping_add((OFFSET as Utarget) << 2);
+        let next_pc = initial_pc + PcOffset(OFFSET << 2);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
@@ -820,7 +820,7 @@ mod tests {
         const OFFSET: Itarget = 4;
 
         let mut cpu = create_cpu();
-        let next_pc = 4;
+        let next_pc = Pc(4);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
@@ -866,7 +866,7 @@ mod tests {
         cpu.reg_mut(BASE_IDX).unwrap().write(BASE_ADDR).unwrap();
 
         let ld = Ld::from_fields(OFFSET, RT_IDX, BASE_IDX);
-        assert_eq!(cpu.interpret(ld).unwrap(), 4);
+        assert_eq!(cpu.interpret(ld).unwrap(), Pc(4));
 
         let result = cpu.reg(RT_IDX).unwrap().read().unwrap();
         assert_eq!(result, MEM_VALUE);
@@ -934,7 +934,7 @@ mod tests {
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
         let xor = Xor::from_fields(RD_IDX, RT_IDX, RS_IDX);
-        assert_eq!(cpu.interpret(xor).unwrap(), 4);
+        assert_eq!(cpu.interpret(xor).unwrap(), Pc(4));
 
         let result = cpu.reg(RD_IDX).unwrap().read().unwrap();
         assert_eq!(result, EXPECTED_RESULT);
@@ -958,7 +958,7 @@ mod tests {
 
         let mut cpu = create_cpu();
         let initial_pc = cpu.pc();
-        let next_pc = initial_pc.wrapping_add((OFFSET as Utarget) << 2);
+        let next_pc = initial_pc + PcOffset(OFFSET << 2);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
@@ -994,7 +994,7 @@ mod tests {
         const OFFSET: Itarget = 4;
 
         let mut cpu = create_cpu();
-        let next_pc = 4;
+        let next_pc = Pc(4);
         cpu.reg_mut(RS_IDX).unwrap().write(RS_VALUE).unwrap();
         cpu.reg_mut(RT_IDX).unwrap().write(RT_VALUE).unwrap();
 
@@ -1008,20 +1008,20 @@ mod tests {
         let mut cpu = create_cpu();
         {
             const JUMP_INDEX: u32 = 0x3ffffff;
-            const EXPECTED_ADDR: Utarget = 0xffffffc;
+            const EXPECTED_ADDR: Pc = Pc(0xffffffc);
 
             let j = J::from_fields(JUMP_INDEX);
             assert_eq!(cpu.interpret(j).unwrap(), EXPECTED_ADDR);
             assert_eq!(cpu.pc(), EXPECTED_ADDR);
         }
         {
-            const EXPECTED_ADDR: Utarget = 0x10000000;
+            const EXPECTED_ADDR: Pc = Pc(0x10000000);
             let xor = Xor::from_fields(0, 0, 0);
             assert_eq!(cpu.interpret(xor).unwrap(), EXPECTED_ADDR);
         }
         {
             const JUMP_INDEX: u32 = 0x3ffffff;
-            const EXPECTED_ADDR: Utarget = 0x1ffffffc;
+            const EXPECTED_ADDR: Pc = Pc(0x1ffffffc);
 
             let j = J::from_fields(JUMP_INDEX);
             assert_eq!(cpu.interpret(j).unwrap(), EXPECTED_ADDR);
@@ -1029,7 +1029,7 @@ mod tests {
         }
         {
             const JUMP_INDEX: u32 = 0x0;
-            const EXPECTED_ADDR: Utarget = 0x10000000;
+            const EXPECTED_ADDR: Pc = Pc(0x10000000);
 
             let j = J::from_fields(JUMP_INDEX);
             assert_eq!(cpu.interpret(j).unwrap(), EXPECTED_ADDR);
@@ -1040,7 +1040,7 @@ mod tests {
     #[test]
     fn test_j_instruction_self_jump() {
         const JUMP_INDEX: u32 = 0x0;
-        const EXPECTED_ADDR: Utarget = 0x0;
+        const EXPECTED_ADDR: Pc = Pc(0x0);
 
         let mut cpu = create_cpu();
         let j = J::from_fields(JUMP_INDEX);
