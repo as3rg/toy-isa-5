@@ -1,3 +1,5 @@
+#!/usr/bin/env ruby
+
 class TOYISA5Assembler
   def initialize
     @instructions = []
@@ -145,133 +147,7 @@ class TOYISA5Assembler
     end
   end
 
-  def r0
-    0
-  end
-
-  def r1
-    1
-  end
-
-  def r2
-    2
-  end
-
-  def r3
-    3
-  end
-
-  def r4
-    4
-  end
-
-  def r5
-    5
-  end
-
-  def r6
-    6
-  end
-
-  def r7
-    7
-  end
-
-  def r8
-    8
-  end
-
-  def r9
-    9
-  end
-
-  def r10
-    10
-  end
-
-  def r11
-    11
-  end
-
-  def r12
-    12
-  end
-
-  def r13
-    13
-  end
-
-  def r14
-    14
-  end
-
-  def r15
-    15
-  end
-
-  def r16
-    16
-  end
-
-  def r17
-    17
-  end
-
-  def r18
-    18
-  end
-
-  def r19
-    19
-  end
-
-  def r20
-    20
-  end
-
-  def r21
-    21
-  end
-
-  def r22
-    22
-  end
-
-  def r23
-    23
-  end
-
-  def r24
-    24
-  end
-
-  def r25
-    25
-  end
-
-  def r26
-    26
-  end
-
-  def r27
-    27
-  end
-
-  def r28
-    28
-  end
-
-  def r29
-    29
-  end
-
-  def r30
-    30
-  end
-
-  def r31
-    31
-  end
+  (0..31).each { |i| define_method("r#{i}") { i } }
 
   def li(reg, val)
     nor reg, reg, reg
@@ -284,36 +160,30 @@ class TOYISA5Assembler
 
 end
 
-# Example usage:
-if __FILE__ == $0
+if ARGV.empty?
+  puts "Usage: #{$0} <filename>"
+  exit 1
+end
+
+filename = ARGV[0]
+
+unless File.exist?(filename)
+  puts "Error: File '#{filename}' not found"
+  exit 1
+end
+
+begin
   assembler = TOYISA5Assembler.new
-
+  content = File.read(filename)
   assembler.proc do
-    li r0, 0
-    li r1, 1
-
-    li r2, 0   # Fib[n - 1]
-    li r3, 1   # Fib[n    ]
-
-    li r4, 8   # n
-    nor r5, r5, r5
-
-    beq r4, r1, 6
-    add r4, r4, r5
-
-    add r6, r2, r0
-    add r2, r3, r0
-    add r3, r2, r6
-
-    beq r0, r0, -5
-
-    li r8, 60
-    add r0, r0, r3
-
-    syscall
+    eval(content)
   end
-
-  # Display and save
   assembler.display
   assembler.write_to_file('program.bin')
+rescue SyntaxError => e
+  puts "Syntax error in file: #{e.message}"
+rescue SecurityError => e
+  puts "Security error: #{e.message}"
+rescue StandardError => e
+  puts "Error during evaluation: #{e.message}"
 end
